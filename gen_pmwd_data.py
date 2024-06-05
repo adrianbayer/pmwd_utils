@@ -26,5 +26,4 @@ p0 = jnp.array([omegam, sigma_8])
 cosmo = Cosmology.from_sigma8(conf, Omega_m=omegam, sigma8=sigma_8, n_s=0.96, Omega_b=0.05, h=0.7)
 cosmo = boltzmann(cosmo, conf)
 
-print(gendata(conf, seed, cosmo, dnoise=dnoise, savepath=None))
 modes, lin_modes_c, lin_modes, dens, data, ptcl = gendata(conf, seed, cosmo, dnoise=dnoise, savepath=None)
