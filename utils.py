@@ -164,3 +164,368 @@ def plotdata(conf, modes, lin_modes, dens, data, savepath=None, kmin=0, kmax=Non
     axar[1, 1].set_title('Data')
     plt.savefig(savepath + 'dataim.png')
     plt.close()
+
+@jit
+def genrete_realx_gaussian_field_3d_k_mask(randns, dtype=jnp.float64, cdtype=jnp.complex128):
+    """
+    randns is an array with nc^3 standard normal vars
+    """
+    #import numpy as jnp    # change to jax after! fixme
+    
+    randns = randns.flatten()
+    nc = round(randns.shape[0]**(1./3))
+    
+    # due to G*(f) = G(-f) symmetry, the return value will have shape nc,nc/2+1 (assuming d even)
+    n = round(nc/2)+1
+    
+    ret = jnp.zeros(shape=(nc,nc,n,), dtype=cdtype) 
+    
+    # grid for masking
+    #grid0, grid1, grid2 = jnp.meshgrid(jnp.arange(nc), jnp.arange(nc), jnp.arange(n))
+     
+    # fill all non k2=0 and nyq voxels with complex number  (n-1 is nyq)
+    s = (nc, nc, n-2)
+    m = math.prod(s)
+    
+    #mask = (1 <= grid2) * (grid2 < n-1)
+    pads = ((0,0), (0,0), (1,1))    # need to pad r such that it has same shape as mask, and aligns with the 1s.  # fixme, can completely remove mask!
+    
+    i = 0         # running index for taking dofs    for neatness, always have i= above r=
+    r = randns[i:i+m].reshape(s)    # do sqrt2 just before end
+    i += m
+    
+    ret += jnp.pad(r, pads)
+    
+    r = randns[i:i+m].reshape(s) * 1j
+    i += m
+    
+    ret += jnp.pad(r, pads)
+    
+    # fill k2=0 nyq>k0>0  (note use of n in firt index now) only want to fill half and then will conj flip by sim.
+    # we have a choice to reflect in axis 0 or 1. we chose to reflect in 1 first, 
+    # so compared to 2d we just have an extra :, at the beginnign.
+    # but then we'll have anthertep to reflect in 0 dimension
+    # to keep track of rands easily will do reflection conj by hand.
+    s = (nc, n-2, 1)
+    m = math.prod(s)
+    for b in [0,n-1]:                                # same methodology for when grid2=0 or nyq, o loop
+        
+        r = randns[i:i+m].reshape(s)
+        i += m
+        
+        pads = [None, None, None]   # save space by updating pads[i] depending on line.
+        if   b == 0:   pads[2] = (0,n-1)   # pads[2] is the same throughout loop
+        elif b == n-1: pads[2] = (n-1,0) 
+        
+        #mask = (1 <= grid1) * (grid1 < n-1) * (grid2 == b)
+        pads[0] = (0,0)
+        pads[1] = (1,n-1)
+        
+        ret += jnp.pad(r, pads)
+        
+        # do reflections for grid2=0 before shifting randns for imaginary part agin lots of steps: now we will need to pad AND mask
+        # padding ofc needed for shape as above, and mask needed because we want to only reflect certain subregions of r each time)
+        #pads[1] = (n,0)   # same for all of these reflections
+        
+        
+        # real part reflections. recall r is unpadded, so simple ::-1 (in 1 index) followed by appropriate padding and 0 index works!
+        pads[1] = (n,0)   # the 1 axis always wants these pads for the mirror region
+        #mask = (grid0 == 0) * (n <= grid1) * (grid2 == b) 
+        pads[0] = (0,nc-1)
+        ret += jnp.pad(r[0,::-1,b][None,:,None], pads)
+        #mask = (grid0 == n-1) * (n <= grid1) * (grid2 == b)
+        pads[0] = (n-1,n-2)
+        ret += jnp.pad(r[n-1,::-1,b][None,:,None], pads) 
+        #mask = (n <= grid0) * (n <= grid1) * (grid2 == b) 
+        pads[0] = (n,0)
+        ret += jnp.pad(r[n-2:0:-1,::-1,b][:,:,None], pads)
+        #mask = (1 <= grid0) * (grid0 < n-1) * (n <= grid1) * (grid2 == b)
+        pads[0] = (1,n-1)
+        ret += jnp.pad(r[:n-1:-1,::-1,b][:,:,None], pads)
+        
+        # now do same for imaginary part
+        r = randns[i:i+m].reshape(s) * 1j
+        i += m
+        
+        #mask = (1 <= grid1) * (grid1 < n-1) * (grid2 == b)
+        pads[0] = (0,0)
+        pads[1] = (1,n-1)
+        
+        ret += jnp.pad(r, pads)
+        
+        # do reflections for grid2=0 before shifting randns for imaginary part agin lots of steps. - for conj
+        pads[1] = (n,0)   # the 1 axis always wants these pads for the mirror region
+        #mask = (grid0 == 0) * (n <= grid1) * (grid2 == b)
+        pads[0] = (0,nc-1)
+        ret -= jnp.pad(r[0,::-1,b][None,:,None], pads)
+        #mask = (grid0 == n-1) * (n <= grid1) * (grid2 == b)
+        pads[0] = (n-1,n-2)
+        ret -= jnp.pad(r[n-1,::-1,b][None,:,None], pads)
+        #mask = (n <= grid0) * (n <= grid1) * (grid2 == b)
+        pads[0] = (n,0)
+        ret -= jnp.pad(r[n-2:0:-1,::-1,b][:,:,None], pads)
+        #mask = (1 <= grid0) * (grid0 < n-1) * (n <= grid1) * (grid2 == b)
+        pads[0] = (1,n-1)
+        ret -= jnp.pad(r[:n-1:-1,::-1,b][:,:,None], pads)
+        
+    # now we fill the remaining lines across the 0 axis
+    s = (n-2, 1, 1)
+    m = math.prod(s)
+    for b2 in [0, n-1]:
+        for b1 in [0, n-1]:
+            r = randns[i:i+m].reshape(s)
+            i += m
+            
+            pads = [None, None, None]   # save space by updating pads[i] depending on line.
+            if   b2 == 0:   pads[2] = (0,n-1)   # pads[2] is the same throughout loop
+            elif b2 == n-1: pads[2] = (n-1,0) 
+            if   b1 == 0:   pads[1] = (0,nc-1)   # pads[1] is the same throughout loop
+            elif b1 == n-1: pads[1] = (n-1,n-2) 
+
+            # real
+            #mask = (1 <= grid0) * (grid0 < n-1) * (grid1 == b1) * (grid2 == b2)
+            pads[0] = (1,n-1)
+            ret += jnp.pad(r, pads)
+            # reflect
+            #mask = (n <= grid0) * (grid1 == b1) * (grid2 == b2)
+            pads[0] = (n,0)
+            ret += jnp.pad(r[::-1, b1, b2][:,None,None], pads)         #n-2:0:-1
+            
+            
+            r = randns[i:i+m].reshape(s) * 1j
+            i += m
+            
+            # im
+            #mask = (1 <= grid0) * (grid0 < n-1) * (grid1 == b1) * (grid2 == b2)
+            pads[0] = (1,n-1)
+            ret += jnp.pad(r, pads)
+            # reflect
+            #mask = (n <= grid0) * (grid1 == b1) * (grid2 == b2)
+            pads[0] = (n,0)
+            ret -= jnp.pad(r[::-1, b1, b2][:,None,None], pads)
+    
+    # divide everyhting by sqrt(2) before doing real components
+    ret /= jnp.sqrt(2)
+    
+    # now fill in real parts
+    s = (1, 1, 1)
+    m = math.prod(s)
+    for b2 in [0, n-1]:
+        for b1 in [0, n-1]:
+            for b0 in [0, n-1]:
+                
+                pads = [None, None, None]   # save space by updating pads[i] depending on line.
+                if   b2 == 0:   pads[2] = (0,n-1)   # pads[2] is the same throughout loop
+                elif b2 == n-1: pads[2] = (n-1,0) 
+                if   b1 == 0:   pads[1] = (0,nc-1)   # pads[1] is the same throughout loop
+                elif b1 == n-1: pads[1] = (n-1,n-2) 
+                if   b0 == 0:   pads[0] = (0,nc-1)   # pads[0] is the same throughout loop
+                elif b0 == n-1: pads[0] = (n-1,n-2) 
+
+                r = randns[i:i+m].reshape(s)
+                i += m
+    
+                #mask = (grid0 == b0) * (grid1 == b1) * (grid2 == b2)
+                ret += jnp.pad(r, pads)
+            
+    assert(i == nc**3)
+    
+    return ret #jnp.asarray(ret)
+
+#@jit   # don't jit, this is based on numpy
+def genrete_realx_gaussian_field_3d_k_mask_freqmags(nc, dtype=jnp.float64, cdtype=jnp.complex128):
+    """
+    let's get the frequencies of each component of the input of the function, for preconsditioning. 
+    this is like rfftfreq essentially but the input of genrete_realx_gaussian_field_3d_k_mask
+    randns_nc is the nc associated with rands, where there are nc**3 dofs. Assuming 3d.
+    
+    much easier to dow tih item assignment, so will just compute the freqs using numpy.
+    only need to do once at start of sim, so not a big problem.
+    
+    can remove the actual computation of the grid eventually FIXME
+    """
+    #import numpy as jnp    # change to jax after! fixme
+    
+    ###randns = randns.flatten()
+    ##nc = round(randns.shape[0]**(1./3))
+    randns = jnp.ones(nc**3)   # just a mask of ones. pad with 0s.
+    
+    # due to G*(f) = G(-f) symmetry, the return value will have shape nc,nc/2+1 (assuming d even)
+    n = round(nc/2)+1
+    
+    
+    ###ret_shape = (nc,nc,n,)
+    ###ret = jnp.zeros(shape=ret_shape, dtype=cdtype) 
+    
+    # output freq grid too!! these few lines, along with a freqs_randn[i:i+m] = freqs_ret[jnp.pad(r, pads) != 0].flatten() acompantying in between each i and i+=m. (not this needs to be AFTER the appropriate pads are defined!)
+    # use != 0 not astype.bool, because for np 1j = True, but for jax 1j = False 
+    ###freq_period = 2. * jnp.pi / spacing
+    kvec = rfftnfreq(shape=(nc,)*3, spacing=1, dtype=dtype)   #  spacing=1 means grid units/2pi units, so we'll have to multiply by grid spacing after
+    freqs_ret = jnp.sqrt(sum(k**2 for k in kvec))   # this is the freqs corresponding to the returned k-space field. this is just rfft_freq.  
+    freqs_randn = np.empty(nc**3)       # this is the k corresponding to each of the rands input. i.e. use numpy for slicing purposes.
+    
+    # grid for masking
+    #grid0, grid1, grid2 = jnp.meshgrid(jnp.arange(nc), jnp.arange(nc), jnp.arange(n))
+     
+    # fill all non k2=0 and nyq voxels with complex number  (n-1 is nyq)
+    s = (nc, nc, n-2)
+    m = math.prod(s)
+    
+    #mask = (1 <= grid2) * (grid2 < n-1)
+    pads = ((0,0), (0,0), (1,1))    # need to pad r such that it has same shape as mask, and aligns with the 1s.  # fixme, can completely remove mask!
+    
+    i = 0         # running index for taking dofs    for neatness, always have i= above r=
+    r = randns[i:i+m].reshape(s)    # do sqrt2 just before end
+    freqs_randn[i:i+m] = freqs_ret[jnp.pad(r, pads) != 0].flatten() 
+    i += m
+    
+    ###ret += jnp.pad(r, pads)
+    
+    r = randns[i:i+m].reshape(s) * 1j
+    freqs_randn[i:i+m] = freqs_ret[jnp.pad(r, pads) != 0].flatten() 
+    i += m
+    
+    ###ret += jnp.pad(r, pads)
+    
+    # fill k2=0 nyq>k0>0  (note use of n in firt index now) only want to fill half and then will conj flip by sim.
+    # we have a choice to reflect in axis 0 or 1. we chose to reflect in 1 first, 
+    # so compared to 2d we just have an extra :, at the beginnign.
+    # but then we'll have anthertep to reflect in 0 dimension
+    # to keep track of rands easily will do reflection conj by hand.
+    s = (nc, n-2, 1)
+    m = math.prod(s)
+    
+    for b in [0,n-1]:                                # same methodology for when grid2=0 or nyq, o loop
+        
+        pads = [None, None, None]   # save space by updating pads[i] depending on line.
+        if   b == 0:   pads[2] = (0,n-1)   # pads[2] is the same throughout loop
+        elif b == n-1: pads[2] = (n-1,0) 
+        
+        #mask = (1 <= grid1) * (grid1 < n-1) * (grid2 == b)
+        pads[0] = (0,0)
+        pads[1] = (1,n-1)
+        
+        r = randns[i:i+m].reshape(s)
+        freqs_randn[i:i+m] = freqs_ret[jnp.pad(r, pads) != 0].flatten() 
+        i += m
+        
+        ###ret += jnp.pad(r, pads)
+        
+        # do reflections for grid2=0 before shifting randns for imaginary part agin lots of steps: now we will need to pad AND mask
+        # padding ofc needed for shape as above, and mask needed because we want to only reflect certain subregions of r each time)
+        #pads[1] = (n,0)   # same for all of these reflections
+        
+        """
+        # real part reflections. recall r is unpadded, so simple ::-1 (in 1 index) followed by appropriate padding and 0 index works!
+        pads[1] = (n,0)   # the 1 axis always wants these pads for the mirror region
+        #mask = (grid0 == 0) * (n <= grid1) * (grid2 == b) 
+        pads[0] = (0,nc-1)
+        ret += jnp.pad(r[0,::-1,b][None,:,None], pads)
+        #mask = (grid0 == n-1) * (n <= grid1) * (grid2 == b)
+        pads[0] = (n-1,n-2)
+        ret += jnp.pad(r[n-1,::-1,b][None,:,None], pads) 
+        #mask = (n <= grid0) * (n <= grid1) * (grid2 == b) 
+        pads[0] = (n,0)
+        ret += jnp.pad(r[n-2:0:-1,::-1,b][:,:,None], pads)
+        #mask = (1 <= grid0) * (grid0 < n-1) * (n <= grid1) * (grid2 == b)
+        pads[0] = (1,n-1)
+        ret += jnp.pad(r[:n-1:-1,::-1,b][:,:,None], pads)
+        """
+               
+        #mask = (1 <= grid1) * (grid1 < n-1) * (grid2 == b)
+        pads[0] = (0,0)
+        pads[1] = (1,n-1)
+        
+        # now do same for imaginary part
+        r = randns[i:i+m].reshape(s) * 1j
+        freqs_randn[i:i+m] = freqs_ret[jnp.pad(r, pads) != 0].flatten() 
+        i += m
+        
+        ###ret += jnp.pad(r, pads)
+        """
+        # do reflections for grid2=0 before shifting randns for imaginary part agin lots of steps. - for conj
+        pads[1] = (n,0)   # the 1 axis always wants these pads for the mirror region
+        #mask = (grid0 == 0) * (n <= grid1) * (grid2 == b)
+        pads[0] = (0,nc-1)
+        ret -= jnp.pad(r[0,::-1,b][None,:,None], pads)
+        #mask = (grid0 == n-1) * (n <= grid1) * (grid2 == b)
+        pads[0] = (n-1,n-2)
+        ret -= jnp.pad(r[n-1,::-1,b][None,:,None], pads)
+        #mask = (n <= grid0) * (n <= grid1) * (grid2 == b)
+        pads[0] = (n,0)
+        ret -= jnp.pad(r[n-2:0:-1,::-1,b][:,:,None], pads)
+        #mask = (1 <= grid0) * (grid0 < n-1) * (n <= grid1) * (grid2 == b)
+        pads[0] = (1,n-1)
+        ret -= jnp.pad(r[:n-1:-1,::-1,b][:,:,None], pads)
+        """
+    # now we fill the remaining lines across the 0 axis
+    s = (n-2, 1, 1)
+    m = math.prod(s)
+    for b2 in [0, n-1]:
+        for b1 in [0, n-1]:
+            
+            pads = [None, None, None]   # save space by updating pads[i] depending on line.
+            if   b2 == 0:   pads[2] = (0,n-1)   # pads[2] is the same throughout loop
+            elif b2 == n-1: pads[2] = (n-1,0) 
+            if   b1 == 0:   pads[1] = (0,nc-1)   # pads[1] is the same throughout loop
+            elif b1 == n-1: pads[1] = (n-1,n-2) 
+
+            # real
+            #mask = (1 <= grid0) * (grid0 < n-1) * (grid1 == b1) * (grid2 == b2)
+            pads[0] = (1,n-1)
+            
+            r = randns[i:i+m].reshape(s)
+            freqs_randn[i:i+m] = freqs_ret[jnp.pad(r, pads) != 0].flatten() 
+            i += m
+            
+            ###ret += jnp.pad(r, pads)
+            
+            # reflect
+            #mask = (n <= grid0) * (grid1 == b1) * (grid2 == b2)
+            pads[0] = (n,0)
+            ###ret += jnp.pad(r[::-1, b1, b2][:,None,None], pads)         #n-2:0:-1
+            
+            
+            # im
+            #mask = (1 <= grid0) * (grid0 < n-1) * (grid1 == b1) * (grid2 == b2)
+            pads[0] = (1,n-1)
+            
+            r = randns[i:i+m].reshape(s) * 1j
+            freqs_randn[i:i+m] = freqs_ret[jnp.pad(r, pads) != 0].flatten() 
+            i += m
+            
+            ###ret += jnp.pad(r, pads)
+            
+            # reflect
+            #mask = (n <= grid0) * (grid1 == b1) * (grid2 == b2)
+            pads[0] = (n,0)
+            ###ret -= jnp.pad(r[::-1, b1, b2][:,None,None], pads)
+    
+    # divide everyhting by sqrt(2) before doing real components
+    ###ret /= jnp.sqrt(2)
+    
+    # now fill in real parts
+    s = (1, 1, 1)
+    m = math.prod(s)
+    for b2 in [0, n-1]:
+        for b1 in [0, n-1]:
+            for b0 in [0, n-1]:
+                
+                pads = [None, None, None]   # save space by updating pads[i] depending on line.
+                if   b2 == 0:   pads[2] = (0,n-1)   # pads[2] is the same throughout loop
+                elif b2 == n-1: pads[2] = (n-1,0) 
+                if   b1 == 0:   pads[1] = (0,nc-1)   # pads[1] is the same throughout loop
+                elif b1 == n-1: pads[1] = (n-1,n-2) 
+                if   b0 == 0:   pads[0] = (0,nc-1)   # pads[0] is the same throughout loop
+                elif b0 == n-1: pads[0] = (n-1,n-2) 
+
+                r = randns[i:i+m].reshape(s)
+                freqs_randn[i:i+m] = freqs_ret[jnp.pad(r, pads) != 0].flatten() 
+                i += m
+    
+                #mask = (grid0 == b0) * (grid1 == b1) * (grid2 == b2)
+                ###ret += jnp.pad(r, pads)
+            
+    assert(i == nc**3)
+    
+    return freqs_randn #jnp.asarray(ret)
