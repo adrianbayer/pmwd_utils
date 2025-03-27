@@ -1,4 +1,8 @@
 # real space posterior (Lk=0) with gaussian noise
+from jax import jit
+import jax.numpy as jnp
+
+from pmwd_imports import *
 
 @jit
 def compute_res(modes, p0, data, conf):
